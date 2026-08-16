@@ -29,6 +29,21 @@ export const AUDIO_EXT_TO_MIME: Record<string, string> = {
   webm: "audio/webm",
 };
 
+export const VIDEO_EXT_TO_MIME: Record<string, string> = {
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
+  webm: "video/webm",
+  ogv: "video/ogg",
+  mpg: "video/mpeg",
+  mpeg: "video/mpeg",
+  ts: "video/mp2t",
+  m2ts: "video/mp2t",
+  "3gp": "video/3gpp",
+};
+
 export const DOCUMENT_EXT_TO_MIME: Record<DocumentPreviewKind, string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -50,6 +65,10 @@ export function getAudioMime(filePath: string): string | null {
   return AUDIO_EXT_TO_MIME[getFileExt(filePath)] ?? null;
 }
 
+export function getVideoMime(filePath: string): string | null {
+  return VIDEO_EXT_TO_MIME[getFileExt(filePath)] ?? null;
+}
+
 export function getDocumentMime(filePath: string): string | null {
   return DOCUMENT_EXT_TO_MIME[getFileExt(filePath) as DocumentPreviewKind] ?? null;
 }
@@ -66,6 +85,15 @@ export function isImagePath(filePath: string): boolean {
 
 export function isAudioPath(filePath: string): boolean {
   return getAudioMime(filePath) !== null;
+}
+
+/**
+ * Note: `.webm`/`.ogv` are listed in both tables. Video wins in every
+ * dispatch site (`read`, FileViewer) because a <video> element plays
+ * audio-only files too, while an <audio> element cannot show video.
+ */
+export function isVideoPath(filePath: string): boolean {
+  return getVideoMime(filePath) !== null;
 }
 
 export function isDocumentPreviewPath(filePath: string): boolean {
