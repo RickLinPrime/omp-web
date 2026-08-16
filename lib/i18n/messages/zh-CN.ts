@@ -316,6 +316,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.dormant": "休眠",
     "chat.commandCompact": "压缩上下文，可选附加说明",
     "chat.commandReload": "重新加载扩展、技能、提示词和工具",
+    "chat.commandGoal": "设置或管理会话目标(持久化自主目标)",
     "chat.commandName": "设置会话显示名称",
     "chat.commandSession": "显示会话消息、Token 和费用统计",
     "chat.commandCopy": "复制最后一条助手消息",

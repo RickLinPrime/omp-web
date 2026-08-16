@@ -276,6 +276,10 @@ export class AgentSessionWrapper {
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly subagents: RpcSubagentRegistry;
+  // Tool set snapshot taken when goal mode was entered, so exiting goal mode
+  // (pause/drop) can restore the session's previous tools — the same bookkeeping
+  // the TUI keeps in interactive mode.
+  private goalPreviousTools?: string[];
   // The SDK registry removes terminal entries after emitting their lifecycle frame.
   // Keep a bounded per-session copy so state requests can still expose history.
   private readonly subagentHistory = new Map<string, SubagentSnapshot>();
@@ -686,6 +690,26 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
+  private assertGoalEnabled(): void {
+    if (!this.inner.settings.get("goal.enabled")) {
+      throw new Error("Goal mode is disabled. Enable it in settings (goal.enabled).");
+    }
+  }
+
+  private async enterGoalTools(): Promise<void> {
+    this.goalPreviousTools = this.inner.getEnabledToolNames().filter((name) => name !== "goal");
+    await this.inner.setActiveToolsByName([...new Set([...this.goalPreviousTools, "goal"])]);
+  }
+
+  private async restoreGoalTools(): Promise<void> {
+    if (!this.goalPreviousTools) return;
+    const previous = this.goalPreviousTools;
+    this.goalPreviousTools = undefined;
+    if (this.inner.getEnabledToolNames().includes("goal")) {
+      await this.inner.setActiveToolsByName(previous);
+    }
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
@@ -956,6 +980,68 @@ export class AgentSessionWrapper {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
         return null;
+      }
+
+      case "get_goal_state": {
+        const state = this.inner.getGoalModeState();
+        return { state: state ? { enabled: state.enabled, mode: state.mode, reason: state.reason, goal: { ...state.goal } } : null };
+      }
+
+      case "goal_set": {
+        this.assertGoalEnabled();
+        const objective = String(command.objective ?? "").trim();
+        if (!objective) throw new Error("Usage: /goal set <objective>");
+        const existing = this.inner.getGoalModeState();
+        const state = existing?.enabled
+          ? await this.inner.goalRuntime.replaceGoal({ objective })
+          : await this.inner.goalRuntime.createGoal({ objective });
+        await this.enterGoalTools();
+        if (this.inner.isStreaming) await this.inner.sendGoalModeContext({ deliverAs: "steer" });
+        return { state: { enabled: state.enabled, mode: state.mode, goal: { ...state.goal } } };
+      }
+
+      case "goal_pause": {
+        this.assertGoalEnabled();
+        if (!this.inner.getGoalModeState()?.enabled) throw new Error("No active goal to pause.");
+        await this.inner.goalRuntime.pauseGoal();
+        await this.restoreGoalTools();
+        const state = this.inner.getGoalModeState();
+        return { state: state ? { enabled: state.enabled, mode: state.mode, goal: { ...state.goal } } : null };
+      }
+
+      case "goal_resume": {
+        this.assertGoalEnabled();
+        const state = this.inner.getGoalModeState();
+        if (!state?.goal || state.goal.status !== "paused") throw new Error("No paused goal to resume.");
+        const next = await this.inner.goalRuntime.resumeGoal();
+        await this.enterGoalTools();
+        if (this.inner.isStreaming) await this.inner.sendGoalModeContext({ deliverAs: "steer" });
+        return { state: { enabled: next.enabled, mode: next.mode, goal: { ...next.goal } } };
+      }
+
+      case "goal_drop": {
+        const state = this.inner.getGoalModeState();
+        if (!state?.goal) throw new Error("No goal to drop.");
+        await this.inner.goalRuntime.dropGoal();
+        await this.restoreGoalTools();
+        return { state: null };
+      }
+
+      case "goal_budget": {
+        this.assertGoalEnabled();
+        const state = this.inner.getGoalModeState();
+        if (!state?.enabled) throw new Error("No active goal.");
+        const raw = String(command.budget ?? "").trim().toLowerCase();
+        let budget: number | undefined;
+        if (raw !== "off") {
+          const parsed = Number.parseInt(raw, 10);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            throw new Error("Goal budget must be a positive integer or `off`.");
+          }
+          budget = parsed;
+        }
+        const next = await this.inner.goalRuntime.onBudgetMutated(budget);
+        return { state: next ? { enabled: next.enabled, mode: next.mode, goal: { ...next.goal } } : null };
       }
 
       case "get_tools": {
