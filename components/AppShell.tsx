@@ -166,6 +166,10 @@ export function AppShell() {
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
 
+  // Single active panel — only one dropdown open at a time
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
+  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
+
   const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
@@ -173,6 +177,9 @@ export function AppShell() {
   }, []);
 
   const handleBranchLeafChange = useCallback((leafId: string | null) => {
+    // Selecting a leaf performs the rollback; dismiss the panel so the
+    // regenerated branch is immediately visible.
+    setActiveTopPanel(null);
     branchLeafChangeFnRef.current?.(leafId);
   }, []);
 
@@ -216,14 +223,50 @@ export function AppShell() {
     setContextUsage(usage);
   }, []);
 
-  // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
-  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
-
   const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
+
+  // Double-Escape opens the session tree (BranchNavigator), mirroring the
+  // TUI's double-Esc rollback gesture. A single Esc closes an open tree and
+  // keeps the timestamp so a quick second press reopens it (close/reopen
+  // rhythm). The gesture never fires when a dialog is open or when an
+  // editable field holds text, so Esc keeps its normal meaning there.
+  const lastEscapeAtRef = useRef(0);
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target as Element | null;
+      if (target?.closest('[role="dialog"]')) return;
+
+      const el = document.activeElement;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || (el instanceof HTMLElement && el.isContentEditable)) {
+        if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.value.trim() !== "") {
+          return;
+        }
+      }
+
+      const now = Date.now();
+      if (activeTopPanel === "branches") {
+        event.preventDefault();
+        event.stopPropagation();
+        setActiveTopPanel(null);
+        lastEscapeAtRef.current = now;
+        return;
+      }
+      if (now - lastEscapeAtRef.current <= 500) {
+        event.preventDefault();
+        event.stopPropagation();
+        setActiveTopPanel("branches");
+        lastEscapeAtRef.current = 0;
+        return;
+      }
+      lastEscapeAtRef.current = now;
+    };
+    window.addEventListener("keydown", handleEscape, true);
+    return () => window.removeEventListener("keydown", handleEscape, true);
+  }, [activeTopPanel]);
 
   const openSessionStatsPanel = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
