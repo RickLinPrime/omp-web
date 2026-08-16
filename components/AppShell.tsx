@@ -533,6 +533,21 @@ export function AppShell() {
     activeCwd,
   });
 
+  // Slash-command → UI events: /tree opens the branch panel, /new and /drop
+  // switch to a fresh session through the same handler as the sidebar button.
+  useEffect(() => {
+    const openBranches = () => setActiveTopPanel("branches");
+    const newSession = () => {
+      if (activeCwd) handleNewSession(`kb-${Date.now()}`, activeCwd);
+    };
+    window.addEventListener("omp:open-branches", openBranches);
+    window.addEventListener("omp:new-session", newSession);
+    return () => {
+      window.removeEventListener("omp:open-branches", openBranches);
+      window.removeEventListener("omp:new-session", newSession);
+    };
+  }, [handleNewSession, activeCwd]);
+
   // Client-built transient SessionInfo (new session / fork) lacks the
   // server-computed projectRoot, which the same-project check in
   // handleCwdChange relies on. Hydrate it from the session list so switching

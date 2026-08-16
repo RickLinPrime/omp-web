@@ -1855,6 +1855,116 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
 
+        case "clear": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          const result = await sendAgentCommand<{ droppedCount?: number }>(sid, { type: "clear_context" });
+          await loadSession(sid, false, true);
+          return complete({ handled: true, message: `Cleared conversation context (dropped ${result?.droppedCount ?? 0} turn${(result?.droppedCount ?? 0) === 1 ? "" : "s"})` });
+        }
+
+        case "retry": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          await sendAgentCommand(sid, { type: "retry" });
+          return complete({ handled: true, message: "Retrying the last failed turn" });
+        }
+
+        case "queue": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          if (!args) return complete({ handled: true, error: "Usage: /queue <message>" });
+          await sendAgentCommand(sid, { type: "follow_up", message: args });
+          return complete({ handled: true, message: "Queued message for after the current turn" });
+        }
+
+        case "btw": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          if (!args) return complete({ handled: true, error: "Usage: /btw <question>" });
+          const result = await sendAgentCommand<{ replyText?: string }>(sid, { type: "ephemeral_question", question: args });
+          const reply = result?.replyText?.trim();
+          if (!reply) return complete({ handled: true, error: "The side question produced no answer" });
+          appendCommandOutput(reply);
+          return complete({ handled: true });
+        }
+
+        case "plan": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          const result = await sendAgentCommand<{ enabled: boolean; planFilePath?: string }>(sid, { type: "plan_toggle" });
+          if (result?.enabled) {
+            return complete({
+              handled: true,
+              message: "Plan mode enabled — the agent will draft a plan for your approval before executing",
+              ...(args ? { prompt: args } : {}),
+            });
+          }
+          return complete({ handled: true, message: "Plan mode disabled." });
+        }
+
+        case "vibe": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          const result = await sendAgentCommand<{ enabled: boolean }>(sid, { type: "vibe_toggle" });
+          if (result?.enabled) {
+            return complete({
+              handled: true,
+              message: "Vibe mode enabled (read-only toolset)",
+              ...(args ? { prompt: args } : {}),
+            });
+          }
+          return complete({ handled: true, message: "Vibe mode disabled." });
+        }
+
+        case "guided-goal": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          await sendAgentCommand(sid, { type: "goal_guided", objective: args });
+          return complete({ handled: true, message: "Goal interview started — answer the agent's questions; it will create the goal when ready" });
+        }
+
+        case "branch": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          if (!args) return complete({ handled: true, error: "Usage: /branch N — fork from the N-th user message counting backwards" });
+          const index = Number.parseInt(args, 10);
+          if (!Number.isInteger(index) || index < 1) return complete({ handled: true, error: "N must be a positive integer" });
+          const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string }>(sid, { type: "fork", userMessageIndex: index });
+          if (!result?.cancelled && result?.newSessionId) {
+            onSessionForked?.(result.newSessionId);
+            return complete({ handled: true, message: `Branched a new session from user message #${index}` });
+          }
+          return complete({ handled: true, error: "Branch failed — no matching user message" });
+        }
+
+        case "tree": {
+          window.dispatchEvent(new CustomEvent("omp:open-branches"));
+          return complete({ handled: true });
+        }
+
+        case "hotkeys": {
+          appendCommandOutput([
+            "Client keyboard shortcuts:",
+            "  Esc Esc (empty input)  Open the session tree (rollback)",
+            "  Esc                    Close the session tree",
+            "  Cmd/Ctrl+N             New session",
+            "  Cmd/Ctrl+K             Command palette",
+            "  Cmd/Ctrl+B             Toggle project sidebar",
+            "  Cmd/Ctrl+Shift+B       Open the browser",
+            "  Cmd/Ctrl+J             Toggle terminal",
+            "  Cmd/Ctrl+Enter         Steer the current turn",
+            "  Shift+Enter            New line",
+            "  Cmd/Ctrl+I             Mention selected lines (@ file L#-#)",
+          ].join("\n"));
+          return complete({ handled: true });
+        }
+
+        case "new": {
+          window.dispatchEvent(new CustomEvent("omp:new-session"));
+          return complete({ handled: true, message: "Started a new session" });
+        }
+
+        case "drop": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" });
+          if (!res.ok) return complete({ handled: true, error: `Failed to delete session (HTTP ${res.status})` });
+          window.dispatchEvent(new CustomEvent("omp:new-session"));
+          return complete({ handled: true, message: "Session deleted — started a new session" });
+        }
+
         case "goal": {
           if (!sid) return complete({ handled: true, error: "No active session" });
           type GoalStateLite = {

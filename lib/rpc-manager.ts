@@ -31,7 +31,7 @@ import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "./omp-types";
-import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./omp-types";
+import type { AgentSessionLike, ExtensionUiContextLike, ModelLike, ToolInfo } from "./omp-types";
 import type {
   ExtensionAskDialogResult,
   ExtensionUiRequest,
@@ -280,6 +280,10 @@ export class AgentSessionWrapper {
   // (pause/drop) can restore the session's previous tools — the same bookkeeping
   // the TUI keeps in interactive mode.
   private goalPreviousTools?: string[];
+  // Same bookkeeping for plan mode and vibe mode.
+  private planPreviousTools?: string[];
+  private planPreviousModel?: ModelLike;
+  private vibePreviousTools?: string[];
   // The SDK registry removes terminal entries after emitting their lifecycle frame.
   // Keep a bounded per-session copy so state requests can still expose history.
   private readonly subagentHistory = new Map<string, SubagentSnapshot>();
@@ -739,6 +743,7 @@ export class AgentSessionWrapper {
         this.inner.prompt(command.message as string, {
           ...(promptImages?.length ? { images: promptImages } : {}),
           ...(streamingBehavior ? { streamingBehavior } : {}),
+          ...(command.synthetic === true ? { synthetic: true } : {}),
           userInitiated: true,
         }).then(() => {
           this.promptRunning = false;
@@ -839,10 +844,22 @@ export class AgentSessionWrapper {
           throw new Error("Cannot fork while a shell command is running");
         }
         const sessionManager = this.inner.sessionManager;
-        const entryId = resolveForkEntryId(
-          sessionManager.getBranch() as ForkBranchEntry[],
-          command.entryId,
-        );
+        const branchEntries = sessionManager.getBranch() as ForkBranchEntry[];
+        let entryId = resolveForkEntryId(branchEntries, command.entryId);
+        // /branch N — pick the N-th user message counting back from the end.
+        if (!entryId && typeof command.userMessageIndex === "number" && command.userMessageIndex >= 1) {
+          let remaining = command.userMessageIndex;
+          for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
+            const candidate = branchEntries[index];
+            if (candidate?.type === "message" && candidate.message?.role === "user" && candidate.id) {
+              remaining -= 1;
+              if (remaining === 0) {
+                entryId = candidate.id;
+                break;
+              }
+            }
+          }
+        }
         if (!entryId) throw new Error("No user message to fork from yet");
         const currentSessionFile = this.inner.sessionFile;
 
@@ -1042,6 +1059,117 @@ export class AgentSessionWrapper {
         }
         const next = await this.inner.goalRuntime.onBudgetMutated(budget);
         return { state: next ? { enabled: next.enabled, mode: next.mode, goal: { ...next.goal } } : null };
+      }
+
+      case "clear_context": {
+        const result = await this.inner.resetSessionContext();
+        invalidateSessionListCache();
+        return { droppedCount: result?.droppedCount ?? 0 };
+      }
+
+      case "retry": {
+        if (this.inner.isStreaming) throw new Error("Session is busy");
+        const ok = await this.inner.retry();
+        if (!ok) throw new Error("Retry failed or no failed turn to retry");
+        return { retried: true };
+      }
+
+      case "ephemeral_question": {
+        const question = String(command.question ?? "").trim();
+        if (!question) throw new Error("Usage: /btw <question>");
+        const result = await this.inner.runEphemeralTurn({ promptText: question });
+        return { replyText: result?.replyText ?? "" };
+      }
+
+      case "plan_toggle": {
+        if (this.inner.getGoalModeState()?.enabled) throw new Error("Exit goal mode first.");
+        if (this.inner.getVibeModeState()?.enabled) throw new Error("Exit vibe mode first.");
+        const existing = this.inner.getPlanModeState();
+        if (existing?.enabled) {
+          this.inner.setPlanModeState(undefined);
+          if (this.planPreviousTools) {
+            await this.inner.setActiveToolsByName(this.planPreviousTools);
+            this.planPreviousTools = undefined;
+          }
+          if (this.planPreviousModel) {
+            const previous = this.planPreviousModel;
+            this.planPreviousModel = undefined;
+            try {
+              await this.inner.setModel(previous);
+            } catch {
+              // keep the current model if the restore fails
+            }
+          }
+          this.inner.sessionManager.appendModeChange("none");
+          return { enabled: false };
+        }
+        if (!this.inner.settings.get("plan.enabled")) {
+          throw new Error("Plan mode is disabled. Enable it in settings (plan.enabled).");
+        }
+        const planFilePath = this.inner.getPlanReferencePath() || "local://PLAN.md";
+        const previousTools = this.inner.getEnabledToolNames();
+        const augmentations = this.inner.hasBuiltInTool("write") ? ["write"] : [];
+        this.planPreviousTools = previousTools;
+        this.planPreviousModel = this.inner.model;
+        await this.inner.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
+        this.inner.setPlanModeState({ enabled: true, planFilePath, workflow: "parallel", reentry: false });
+        // Bind the plan-approval handler so `xd://propose` writes surface as
+        // the plan_review dialog (same wiring as a resumed plan-mode session).
+        this.inner.setPlanProposalHandler?.((title) => this.handlePlanProposal(title));
+        const planModel = this.inner.resolveRoleModelWithThinking?.("plan")?.model;
+        if (planModel) {
+          try {
+            await this.inner.setModel(planModel, "plan");
+          } catch {
+            // plan model is an optimization; keep the current model on failure
+          }
+        }
+        if (this.inner.isStreaming) await this.inner.sendPlanModeContext({ deliverAs: "steer" });
+        this.inner.sessionManager.appendModeChange("plan", { planFilePath });
+        return { enabled: true, planFilePath };
+      }
+
+      case "vibe_toggle": {
+        if (this.inner.getGoalModeState()?.enabled) throw new Error("Exit goal mode first.");
+        if (this.inner.getPlanModeState()?.enabled) throw new Error("Exit plan mode first.");
+        const existing = this.inner.getVibeModeState();
+        if (existing?.enabled) {
+          await this.inner.deactivateVibeTools(this.vibePreviousTools ?? []);
+          this.vibePreviousTools = undefined;
+          this.inner.setVibeModeState(undefined);
+          this.inner.sessionManager.appendModeChange("none");
+          return { enabled: false };
+        }
+        const previousTools = this.inner.getEnabledToolNames();
+        const baseTools = this.inner.hasBuiltInTool("todo") ? ["read", "todo"] : ["read"];
+        this.vibePreviousTools = previousTools;
+        await this.inner.activateVibeTools(baseTools);
+        this.inner.setVibeModeState({ enabled: true });
+        if (this.inner.isStreaming) await this.inner.sendVibeModeContext({ deliverAs: "steer" });
+        this.inner.sessionManager.appendModeChange("vibe");
+        return { enabled: true };
+      }
+
+      case "goal_guided": {
+        this.assertGoalEnabled();
+        if (this.inner.getGoalModeState()?.enabled) throw new Error("Goal mode is already active. Use /goal drop to start over.");
+        const rough = String(command.objective ?? "").trim();
+        await this.enterGoalTools();
+        const kickoff = [
+          "You are conducting a goal-mode interview.",
+          rough
+            ? `The user wants to set up a session goal and described it roughly as: "${rough}".`
+            : "The user wants to set up a session goal but has not described it yet.",
+          "Ask focused clarifying questions (a few at a time) to pin down a single concrete, verifiable objective.",
+          "When the objective is clear, create it by calling the `goal` tool with op=create.",
+          "Do not start working on the objective itself until the goal is created.",
+        ].join("\n");
+        if (this.inner.isStreaming) {
+          await this.inner.prompt(kickoff, { streamingBehavior: "steer", synthetic: true });
+        } else {
+          await this.inner.prompt(kickoff, { synthetic: true });
+        }
+        return { started: true };
       }
 
       case "get_tools": {

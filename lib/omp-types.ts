@@ -184,6 +184,8 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     userInitiated?: boolean;
+    /** Hidden prompt (guided-goal interview kickoff) — not shown as a user turn */
+    synthetic?: boolean;
   }): Promise<boolean>;
   abort(options?: { reason?: string }): Promise<void>;
   executeBash(command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean }): Promise<{ output: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; fullOutputPath?: string }>;
@@ -201,6 +203,13 @@ export interface AgentSessionLike {
    */
   handoff(customInstructions?: string): Promise<{ document: string; savedPath?: string } | undefined>;
   setThinkingLevel(level: string | undefined, persist?: boolean): void;
+  retry(): Promise<boolean>;
+  resetSessionContext(): Promise<{ droppedCount: number } | undefined>;
+  runEphemeralTurn(args: {
+    promptText: string;
+    signal?: unknown;
+    onTextDelta?: (text: string) => void;
+  }): Promise<{ replyText: string; assistantMessage?: unknown }>;
   compact(customInstructions?: string): Promise<unknown>;
   getSessionStats(): Omit<SessionStatsInfo, "sessionName">;
   getLastAssistantText(): string | undefined;
@@ -231,14 +240,23 @@ export interface AgentSessionLike {
     goal: GoalLike;
   } | undefined;
   sendGoalModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
+  hasBuiltInTool(name: string): boolean;
+  getPlanReferencePath(): string;
+  resolveRoleModelWithThinking?(role: string): { model?: ModelLike };
+  sendPlanModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
+  getVibeModeState(): { enabled: boolean } | undefined;
+  setVibeModeState(state: { enabled: boolean } | undefined): void;
+  activateVibeTools(baseToolNames: string[]): Promise<void>;
+  deactivateVibeTools(nextToolNames: string[]): Promise<void>;
+  sendVibeModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
   abortCompaction(): void;
-  getPlanModeState?(): {
+  getPlanModeState(): {
     enabled: boolean;
     planFilePath: string;
     workflow?: "parallel" | "sequential";
     reentry?: boolean;
   } | undefined;
-  setPlanModeState?(state: {
+  setPlanModeState(state: {
     enabled: boolean;
     planFilePath: string;
     workflow?: "parallel" | "sequential";
