@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { allowFileRoot } from "./allowed-roots";
+import { readPreferences } from "./omp-web-preferences";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,14 +96,19 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     let realCwd = cwd;
     try { realCwd = realpathSync(cwd); } catch { /* keep as-is */ }
     // For a linked worktree, --git-dir differs from --git-common-dir.
-    // Only collapse *worktree toplevels* into the main repo. A session whose
-    // cwd is a subdirectory of a repo keeps its own project identity —
-    // grouping subdirs under the repo root would change where new sessions
-    // are created for existing users.
+    // With the "split worktree projects" preference (default on), every
+    // worktree top-level keeps its own project identity so sibling
+    // worktrees (`drama`, `drama-2.5`) are managed as separate projects.
+    // With the preference off, only collapse *worktree toplevels* into the
+    // main repo (upstream behavior). A session whose cwd is a subdirectory
+    // of a repo keeps its own project identity either way — grouping
+    // subdirs under the repo root would change where new sessions are
+    // created for existing users.
     const isTopLevel = toplevel === realCwd;
     const isWorktreeTopLevel = gitDir !== commonDir && isTopLevel;
+    const splitWorktrees = readPreferences().splitWorktreeProjects;
     info = {
-      projectRoot: isWorktreeTopLevel ? dirname(commonDir) : cwd,
+      projectRoot: splitWorktrees || !isWorktreeTopLevel ? cwd : dirname(commonDir),
       branch: ref && ref !== "HEAD" ? ref : null,
       isWorktree: isWorktreeTopLevel,
       isTopLevel,

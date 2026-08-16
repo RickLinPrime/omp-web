@@ -203,8 +203,9 @@ function saveCollapsedProjects(projects: Set<string>): void {
 
 
 /**
- * Return all projects (deduped by projectRoot so worktrees collapse into their
- * main repo) sorted by most recent session activity.
+ * Return all projects (deduped by projectRoot) sorted by most recent session
+ * activity. With the split-worktree preference on (default), each worktree
+ * has its own projectRoot and therefore shows up as its own project row.
  */
 function getRecentProjects(sessions: SessionInfo[]): string[] {
   const latestByRoot = new Map<string, string>(); // projectRoot -> most recent modified
@@ -466,6 +467,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [customPathValidating, setCustomPathValidating] = useState(false);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
+  // omp-web preference: whether each worktree keeps its own project identity
+  // (default true). Mirrors the server-side lib/omp-web-preferences.ts.
+  const [splitWorktreeProjects, setSplitWorktreeProjects] = useState(true);
   const [wtDropdownOpen, setWtDropdownOpen] = useState(false);
   const [wtNewOpen, setWtNewOpen] = useState(false);
   const [wtNewBranch, setWtNewBranch] = useState("");
@@ -505,6 +509,14 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
       setAllSessions(data.sessions);
+      // Keep the split-worktree preference in sync with the server (it can be
+      // toggled from the settings UI of another tab/window).
+      void fetch("/api/preferences", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: { splitWorktreeProjects?: boolean } | null) => {
+          if (d && typeof d.splitWorktreeProjects === "boolean") setSplitWorktreeProjects(d.splitWorktreeProjects);
+        })
+        .catch(() => {});
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
@@ -654,18 +666,31 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    fetch("/api/preferences").then((r) => r.json()).then((d: { splitWorktreeProjects?: boolean }) => {
+      if (typeof d.splitWorktreeProjects === "boolean") setSplitWorktreeProjects(d.splitWorktreeProjects);
+    }).catch(() => {});
+  }, []);
+
   const restoredRef = useRef(false);
 
   /** Resolve the project root for a cwd from the freshest data available */
   const projectRootFor = useCallback((cwd: string | null): string | null => {
     if (!cwd) return null;
-    if (worktreeState && worktreeState.forCwd === cwd) return worktreeState.projectRoot;
-    // Any path in the loaded worktree list belongs to that project — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
-    if (worktreeState?.worktrees.some((w) => w.path === cwd)) return worktreeState.projectRoot;
+    // A session's server-computed projectRoot is authoritative in both modes.
     const match = sessionsForDisplay.find((s) => s.cwd === cwd);
-    return match?.projectRoot ?? cwd;
-  }, [worktreeState, sessionsForDisplay]);
+    if (match) return match.projectRoot ?? cwd;
+    // Aggregated mode (upstream behavior): any path in the loaded worktree
+    // list belongs to the selected project — covers worktrees without
+    // sessions, so switching to them keeps the row mounted.
+    if (!splitWorktreeProjects) {
+      if (worktreeState && (worktreeState.forCwd === cwd || worktreeState.worktrees.some((w) => w.path === cwd))) {
+        return worktreeState.projectRoot;
+      }
+    }
+    // Split mode (default): a worktree without sessions is its own project.
+    return cwd;
+  }, [worktreeState, sessionsForDisplay, splitWorktreeProjects]);
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
