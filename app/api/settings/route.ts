@@ -16,6 +16,9 @@ import {
 import { getOmpRuntime, getSettingsForCwd } from "@/lib/omp-runtime";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { getAvailableWebThemes, getWebThemeConfig } from "@/lib/omp-theme";
+import { readPreferences, writePreferences } from "@/lib/omp-web-preferences";
+import { invalidateProjectCache } from "@/lib/worktree";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 import type {
   SettingsField,
   SettingsFieldType,
@@ -25,6 +28,9 @@ import type {
 } from "@/lib/settings-api";
 
 export const dynamic = "force-dynamic";
+
+/** omp-web specific settings that are not part of omp's own settings schema. */
+const OMP_WEB_SPLIT_WORKTREES_PATH = "ompWeb.splitWorktreeProjects";
 
 async function validateCwd(cwd: string | null): Promise<string | undefined> {
   if (!cwd) return undefined;
@@ -152,6 +158,27 @@ export async function GET(req: Request) {
       }
     }
 
+    // omp-web specific preferences, exposed alongside the canonical schema so
+    // they show up in the same settings UI.
+    const splitPrefs = readPreferences();
+    fields.push({
+      path: OMP_WEB_SPLIT_WORKTREES_PATH,
+      tab: "files",
+      group: "Projects",
+      label: "Split worktree projects",
+      description:
+        "Treat each git worktree as its own project so sibling worktrees "
+        + "(e.g. drama / drama-2.5) are grouped separately in the sidebar. "
+        + "When off, worktrees collapse into their main repository (upstream behavior).",
+      type: "boolean",
+      value: splitPrefs.splitWorktreeProjects,
+      defaultValue: true,
+      configured: splitPrefs.splitWorktreeProjects !== true,
+      options: undefined,
+      ordered: false,
+      condition: undefined,
+    });
+
     const response: SettingsResponse = {
       tabs: SETTING_TABS.map((id) => ({ id, label: TAB_METADATA[id].label, groups: [...TAB_GROUPS[id]] })),
       fields,
@@ -168,6 +195,21 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const body = await req.json() as { path?: string; value?: unknown };
+
+    // omp-web specific preferences bypass the omp settings schema.
+    if (body.path === OMP_WEB_SPLIT_WORKTREES_PATH) {
+      if (typeof body.value !== "boolean") {
+        return NextResponse.json({ error: "Expected a boolean" }, { status: 400 });
+      }
+      const prefs = writePreferences({ splitWorktreeProjects: body.value });
+      // Project identity feeds both the per-cwd resolution cache and the
+      // session-list grouping cache — refresh both so the sidebar regroups
+      // on the next poll.
+      invalidateProjectCache();
+      invalidateSessionListCache();
+      return NextResponse.json({ success: true, value: prefs.splitWorktreeProjects });
+    }
+
     if (!body.path || !(body.path in SETTINGS_SCHEMA) || !hasUi(body.path as SettingPath)) {
       return NextResponse.json({ error: "Unknown setting" }, { status: 400 });
     }
