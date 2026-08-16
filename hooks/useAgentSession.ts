@@ -1855,6 +1855,79 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
 
+        case "goal": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          type GoalStateLite = {
+            enabled: boolean;
+            goal: {
+              objective: string;
+              status: string;
+              tokenBudget?: number;
+              tokensUsed: number;
+              timeUsedSeconds: number;
+            };
+          } | null;
+          const showDetails = (state: GoalStateLite): string => {
+            if (!state?.goal) return "No goal set.";
+            const goal = state.goal;
+            const used = goal.tokensUsed.toLocaleString();
+            const budgetLine = goal.tokenBudget !== undefined
+              ? `${used} / ${goal.tokenBudget.toLocaleString()} tokens (${Math.max(0, goal.tokenBudget - goal.tokensUsed).toLocaleString()} left)`
+              : `${used} tokens (no budget)`;
+            return [
+              `Goal: ${goal.objective}`,
+              `Status: ${goal.status}${state.enabled ? "" : " (paused)"}`,
+              budgetLine,
+              `${Math.max(1, Math.round(goal.timeUsedSeconds / 60))} min elapsed`,
+            ].join("\n");
+          };
+          const goalCommand = async (type: string, payload: Record<string, unknown> = {}) =>
+            sendAgentCommand<{ state: GoalStateLite }>(sid, { type, ...payload });
+
+          const first = args.split(/\s+/)[0]?.toLowerCase() ?? "";
+          const rest = args.replace(/^\S+\s*/, "").trim();
+          const SUBCOMMANDS = new Set(["set", "show", "pause", "resume", "drop", "budget"]);
+
+          if (first === "set" || (first !== "" && !SUBCOMMANDS.has(first))) {
+            const objective = first === "set" ? rest : args;
+            if (!objective) return complete({ handled: true, error: "Usage: /goal set <objective>" });
+            const result = await goalCommand("goal_set", { objective });
+            if (!result?.state?.goal) return complete({ handled: true, error: "Failed to enable goal mode" });
+            return complete({ handled: true, message: `Goal mode enabled: ${result.state.goal.objective}`, prompt: objective });
+          }
+
+          switch (first) {
+            case "show":
+            case "": {
+              const result = await goalCommand("get_goal_state");
+              appendCommandOutput(showDetails(result?.state ?? null));
+              return complete({ handled: true });
+            }
+            case "pause": {
+              const result = await goalCommand("goal_pause");
+              appendCommandOutput(showDetails(result?.state ?? null));
+              return complete({ handled: true, message: "Goal mode paused." });
+            }
+            case "resume": {
+              const result = await goalCommand("goal_resume");
+              appendCommandOutput(showDetails(result?.state ?? null));
+              return complete({ handled: true, message: "Goal mode resumed." });
+            }
+            case "drop": {
+              await goalCommand("goal_drop");
+              return complete({ handled: true, message: "Goal dropped." });
+            }
+            case "budget": {
+              if (!rest) return complete({ handled: true, error: "Usage: /goal budget <N|off>" });
+              const result = await goalCommand("goal_budget", { budget: rest });
+              appendCommandOutput(showDetails(result?.state ?? null));
+              return complete({ handled: true });
+            }
+            default:
+              return complete({ handled: true, error: "Usage: /goal [set|show|pause|resume|drop|budget]" });
+          }
+        }
+
         default: {
           if (!sid) return complete({ handled: true, error: "No active session" });
           const result = await sendAgentCommand<{

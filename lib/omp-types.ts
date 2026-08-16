@@ -134,6 +134,21 @@ export interface ExtensionUiContextLike {
 }
 
 /**
+ * Structural view of omp's `Goal`, from the goal mode state
+ * (`src/goals/state.ts` in the SDK).
+ */
+export interface GoalLike {
+  id: string;
+  objective: string;
+  status: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
  * Structural view of omp's `AgentSession`, narrowed to what omp-web drives.
  *
  * Keeping this structural (rather than importing the class) means an SDK bump
@@ -201,6 +216,21 @@ export interface AgentSessionLike {
   getActiveToolNames(): string[];
   getEnabledToolNames(): string[];
   setActiveToolsByName(names: string[]): Promise<void>;
+  readonly goalRuntime: {
+    createGoal(input: { objective: string; tokenBudget?: number }): Promise<{ enabled: boolean; mode: string; goal: GoalLike }>;
+    replaceGoal(input: { objective: string; tokenBudget?: number }): Promise<{ enabled: boolean; mode: string; goal: GoalLike }>;
+    resumeGoal(): Promise<{ enabled: boolean; mode: string; goal: GoalLike }>;
+    pauseGoal(): Promise<{ enabled: boolean; mode: string; goal: GoalLike } | undefined>;
+    dropGoal(): Promise<GoalLike | undefined>;
+    onBudgetMutated(budget: number | undefined): Promise<{ enabled: boolean; mode: string; goal: GoalLike } | undefined>;
+  };
+  getGoalModeState(): {
+    enabled: boolean;
+    mode: string;
+    reason?: string;
+    goal: GoalLike;
+  } | undefined;
+  sendGoalModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
   abortCompaction(): void;
   getPlanModeState?(): {
     enabled: boolean;

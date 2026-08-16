@@ -316,6 +316,7 @@ export const enLocale: LocalePlugin = {
     "chat.dormant": "dormant",
     "chat.commandCompact": "Compress context, optionally with instructions",
     "chat.commandReload": "Reload extensions, skills, prompts, and tools",
+    "chat.commandGoal": "Set or manage the session goal (persistent autonomous objective)",
     "chat.commandName": "Set the session display name",
     "chat.commandSession": "Show session message, token, and cost stats",
     "chat.commandCopy": "Copy the last assistant message",

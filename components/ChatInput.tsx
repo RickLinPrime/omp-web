@@ -148,6 +148,7 @@ type SlashCommandSource = SlashCommandPaletteItem["source"];
 const BUILTIN_SLASH_COMMANDS: LocalBuiltinSlashCommand[] = [
   { name: "compact", descriptionKey: "chat.commandCompact", source: "builtin" },
   { name: "reload", descriptionKey: "chat.commandReload", source: "builtin" },
+  { name: "goal", descriptionKey: "chat.commandGoal", source: "builtin" },
   { name: "name", descriptionKey: "chat.commandName", source: "builtin" },
   { name: "session", descriptionKey: "chat.commandSession", source: "builtin" },
   { name: "copy", descriptionKey: "chat.commandCopy", source: "builtin" },
