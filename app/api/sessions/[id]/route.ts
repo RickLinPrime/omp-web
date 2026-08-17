@@ -14,7 +14,7 @@ import {
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
-import { projectTreeForResponse } from "@/lib/project-tree";
+import { buildRollbackEntries, projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 
 export async function GET(
@@ -38,7 +38,9 @@ export async function GET(
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries() as never;
     const leafId = sm.getLeafId();
-    const tree = projectTreeForResponse(sm.getTree());
+    const rawTree = sm.getTree();
+    const tree = projectTreeForResponse(rawTree);
+    const rollbackEntries = buildRollbackEntries(rawTree);
     const searchParams = new URL(req.url).searchParams;
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
@@ -76,6 +78,7 @@ export async function GET(
       info,
       leafId,
       tree,
+      rollbackEntries,
       context,
       totalActiveMs,
       ...(contextUsage ? { contextUsage } : {}),

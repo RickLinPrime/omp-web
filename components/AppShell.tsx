@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { isAbortHandlerRegistered, useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { SubagentPanel } from "./SubagentPanel";
 import { ChatWindow } from "./ChatWindow";
@@ -12,6 +12,7 @@ import { SettingsConfig } from "./SettingsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { OmpUpdateIndicator } from "./OmpUpdateIndicator";
 import { BranchNavigator } from "./BranchNavigator";
+import { RollbackPicker } from "./RollbackPicker";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -39,7 +40,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
-import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode, SubagentSnapshot } from "@/lib/types";
+import type { BlockingExtensionUiRequest, SessionInfo, SessionRollbackEntry, SessionTreeNode, SubagentSnapshot } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/omp-types";
@@ -161,27 +162,57 @@ export function AppShell() {
   const topBarRef = useRef<HTMLDivElement>(null);
   const languageBtnRef = useRef<HTMLButtonElement>(null);
 
-  // Branch navigator state — populated by ChatWindow via onBranchDataChange
+  // Branch navigator + rollback picker state — populated by ChatWindow via onBranchDataChange.
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
+  const [rollbackEntries, setRollbackEntries] = useState<SessionRollbackEntry[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
+  const rollbackReturnFocusRef = useRef<HTMLElement | null>(null);
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+  const handleBranchDataChange = useCallback((
+    tree: SessionTreeNode[],
+    entries: SessionRollbackEntry[],
+    activeLeafId: string | null,
+    onLeafChange: (leafId: string | null) => void,
+  ) => {
     setBranchTree(tree);
+    setRollbackEntries(entries);
     setBranchActiveLeafId(activeLeafId);
     branchLeafChangeFnRef.current = onLeafChange;
   }, []);
 
   const handleBranchLeafChange = useCallback((leafId: string | null) => {
-    // Selecting a leaf performs the rollback; dismiss the panel so the
+    // Selecting an entry performs the rollback; dismiss the picker/panel so the
     // regenerated branch is immediately visible.
     setActiveTopPanel(null);
+    setRollbackOpen(false);
     branchLeafChangeFnRef.current?.(leafId);
   }, []);
+
+  const openRollbackPicker = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) rollbackReturnFocusRef.current = active;
+    setActiveTopPanel(null);
+    setRollbackOpen(true);
+  }, []);
+
+  // Return keyboard focus to the element that opened the picker (usually the
+  // chat input) after Esc / selection closes it.
+  useEffect(() => {
+    if (rollbackOpen) return;
+    const previous = rollbackReturnFocusRef.current;
+    if (!previous) return;
+    rollbackReturnFocusRef.current = null;
+    if (previous.isConnected) {
+      const frame = window.requestAnimationFrame(() => previous.focus());
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [rollbackOpen]);
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
@@ -228,15 +259,15 @@ export function AppShell() {
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
 
-  // Double-Escape opens the session tree (BranchNavigator), mirroring the
-  // TUI's double-Esc rollback gesture. A single Esc closes an open tree and
-  // keeps the timestamp so a quick second press reopens it (close/reopen
-  // rhythm). The gesture never fires when a dialog is open or when an
-  // editable field holds text, so Esc keeps its normal meaning there.
+  // Double-Escape opens the keyboard-first rollback picker, mirroring the TUI's
+  // double-Esc session-tree gesture. A single Esc closes an open branch panel;
+  // a quick second press opens the rollback picker. While an agent/bash run is
+  // active, Esc keeps interrupting the run; the gesture is only armed once the
+  // run has settled and the input is empty.
   const lastEscapeAtRef = useRef(0);
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.repeat) return;
       const target = event.target as Element | null;
       if (target?.closest('[role="dialog"]')) return;
 
@@ -255,10 +286,16 @@ export function AppShell() {
         lastEscapeAtRef.current = now;
         return;
       }
+
+      // A running agent/bash owns Esc; ChatInput / the global shortcut send the
+      // abort command. Recording the first press here would make the second
+      // press open the rollback picker instead of aborting again.
+      if (isAbortHandlerRegistered()) return;
+
       if (now - lastEscapeAtRef.current <= 500) {
         event.preventDefault();
         event.stopPropagation();
-        setActiveTopPanel("branches");
+        openRollbackPicker();
         lastEscapeAtRef.current = 0;
         return;
       }
@@ -266,7 +303,7 @@ export function AppShell() {
     };
     window.addEventListener("keydown", handleEscape, true);
     return () => window.removeEventListener("keydown", handleEscape, true);
-  }, [activeTopPanel]);
+  }, [activeTopPanel, openRollbackPicker]);
 
   const openSessionStatsPanel = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
@@ -459,7 +496,9 @@ export function AppShell() {
     });
     setSessionKey((k) => k + 1);
     setBranchTree([]);
+    setRollbackEntries([]);
     setBranchActiveLeafId(null);
+    setRollbackOpen(false);
     setSystemPrompt(null);
     setActiveTopPanel(null);
     // File tabs are keyed by absolute path, so tabs opened in the previous
@@ -520,7 +559,9 @@ export function AppShell() {
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
     setBranchTree([]);
+    setRollbackEntries([]);
     setBranchActiveLeafId(null);
+    setRollbackOpen(false);
     setSystemPrompt(null);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
@@ -533,20 +574,20 @@ export function AppShell() {
     activeCwd,
   });
 
-  // Slash-command → UI events: /tree opens the branch panel, /new and /drop
+  // Slash-command → UI events: /tree opens the rollback picker, /new and /drop
   // switch to a fresh session through the same handler as the sidebar button.
   useEffect(() => {
-    const openBranches = () => setActiveTopPanel("branches");
+    const openRollback = () => openRollbackPicker();
     const newSession = () => {
       if (activeCwd) handleNewSession(`kb-${Date.now()}`, activeCwd);
     };
-    window.addEventListener("omp:open-branches", openBranches);
+    window.addEventListener("omp:open-branches", openRollback);
     window.addEventListener("omp:new-session", newSession);
     return () => {
-      window.removeEventListener("omp:open-branches", openBranches);
+      window.removeEventListener("omp:open-branches", openRollback);
       window.removeEventListener("omp:new-session", newSession);
     };
-  }, [handleNewSession, activeCwd]);
+  }, [handleNewSession, activeCwd, openRollbackPicker]);
 
   // Client-built transient SessionInfo (new session / fork) lacks the
   // server-computed projectRoot, which the same-project check in
@@ -706,7 +747,9 @@ export function AppShell() {
       setNewSessionCwd(cwd ?? null);
       setSessionKey((k) => k + 1);
       setBranchTree([]);
+      setRollbackEntries([]);
       setBranchActiveLeafId(null);
+      setRollbackOpen(false);
       setSystemPrompt(null);
       setActiveTopPanel(null);
       router.replace("/", { scroll: false });
@@ -1868,6 +1911,13 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
+    <RollbackPicker
+      entries={rollbackEntries}
+      activeLeafId={branchActiveLeafId}
+      open={rollbackOpen}
+      onSelect={handleBranchLeafChange}
+      onClose={() => setRollbackOpen(false)}
+    />
     {settingsConfigOpen && (
       <SettingsConfig
         cwd={projectTrustCwd}

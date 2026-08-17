@@ -1160,8 +1160,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
-      // Esc stops the agent when no slash/@/history menu or IME composition is active.
-      if (e.key === "Escape" && !isComposing && isStreaming && onAbort) {
+      // Esc stops the agent when no slash/@/history menu or IME composition is
+      // active. Ignore auto-repeat so holding Esc sends one abort, not a flood.
+      if (e.key === "Escape" && !e.repeat && !isComposing && isStreaming && onAbort) {
         e.preventDefault();
         onAbort();
         return;

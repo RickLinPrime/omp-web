@@ -9,6 +9,7 @@ import type {
   ExtensionUiRequest,
   ExtensionWidgetItem,
   SessionInfo,
+  SessionRollbackEntry,
   SessionTreeNode,
   SubagentSnapshot,
 } from "@/lib/types";
@@ -25,6 +26,7 @@ export interface SessionData {
   filePath: string;
   totalActiveMs: number;
   tree: SessionTreeNode[];
+  rollbackEntries: SessionRollbackEntry[];
   leafId: string | null;
   contextUsage?: ContextUsage;
   context: {
@@ -163,7 +165,7 @@ export interface UseAgentSessionOptions {
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
-  onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
+  onBranchDataChange?: (tree: SessionTreeNode[], rollbackEntries: SessionRollbackEntry[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsPanelOpen?: () => void;
   setToolPreset?: (preset: "none" | "default" | "full") => void;
@@ -1610,10 +1612,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     await loadContext(sid, leafId);
-    if (leafId) {
-      sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
+    if (!leafId) return;
+    try {
+      await sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId });
+    } catch (e) {
+      console.error("Failed to navigate session tree:", e);
+      return;
     }
-  }, [loadContext]);
+    // Refresh the projected tree and rollback candidates now that the leaf has
+    // moved, so reopening the double-Esc picker shows the updated position.
+    if (sessionIdRef.current === sid) await loadSession(sid);
+  }, [loadContext, loadSession]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
@@ -1938,8 +1947,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         case "hotkeys": {
           appendCommandOutput([
             "Client keyboard shortcuts:",
-            "  Esc Esc (empty input)  Open the session tree (rollback)",
-            "  Esc                    Close the session tree",
+            "  Esc Esc (empty input)  Open rollback picker (choose a previous message)",
+            "  Esc                    Interrupt the agent / close an open picker",
             "  Cmd/Ctrl+N             New session",
             "  Cmd/Ctrl+K             Command palette",
             "  Cmd/Ctrl+B             Toggle project sidebar",
@@ -2260,8 +2269,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (!onBranchDataChange) return;
-    onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange);
-  }, [data?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
+    onBranchDataChange(data?.tree ?? [], data?.rollbackEntries ?? [], activeLeafId, handleLeafChange);
+  }, [data?.tree, data?.rollbackEntries, activeLeafId, handleLeafChange, onBranchDataChange]);
 
   useEffect(() => {
     window.addEventListener("keydown", markUserScrollIntent);

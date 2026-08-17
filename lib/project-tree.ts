@@ -1,13 +1,16 @@
-import type { BranchPreview } from "@/lib/types";
+import type { BranchPreview, SessionRollbackEntry } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 export const MAX_PROJECTED_TREE_DEPTH = 200;
 const MAX_BRANCH_PREVIEW_LENGTH = 40;
+const MAX_ROLLBACK_PREVIEW_LENGTH = 160;
 
 type ProjectableEntry = {
   id: string;
   type: string;
   message?: unknown;
+  parentId?: string | null;
+  timestamp?: string;
 };
 
 type ProjectableTreeNode<T> = {
@@ -21,21 +24,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function appendPreviewText(current: string, value: unknown): string {
-  if (typeof value !== "string" || current.length > MAX_BRANCH_PREVIEW_LENGTH) return current;
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) return current;
+function appendPreviewText(current: string, value: unknown, maxLength: number): string {
+  if (typeof value !== "string" || current.length > maxLength) return current;
+  // Bound the normalization pass before the whitespace regex sees huge blocks.
+  const source = value.length > maxLength * 2 ? value.slice(0, maxLength * 2) : value;
+  const normalized = source.replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) return current;
   const separator = current ? " " : "";
   const prefix = current + separator;
-  if (prefix.length >= MAX_BRANCH_PREVIEW_LENGTH + 1) {
-    return prefix.slice(0, MAX_BRANCH_PREVIEW_LENGTH + 1);
+  if (prefix.length >= maxLength + 1) {
+    return prefix.slice(0, maxLength + 1);
   }
-  const remaining = MAX_BRANCH_PREVIEW_LENGTH + 1 - prefix.length;
+  const remaining = maxLength + 1 - prefix.length;
   return prefix + normalized.slice(0, remaining);
 }
 
-function previewForEntry(entry: ProjectableEntry): BranchPreview | undefined {
-  if (entry.type !== "message" || !isRecord(entry.message) || typeof entry.message.role !== "string") {
+function previewForEntry(entry: ProjectableEntry, maxLength = MAX_BRANCH_PREVIEW_LENGTH): BranchPreview | undefined {
+  if (entry.type !== "message" || isRecord(entry.message) === false || typeof entry.message.role !== "string") {
     return undefined;
   }
 
@@ -43,19 +48,19 @@ function previewForEntry(entry: ProjectableEntry): BranchPreview | undefined {
   let text = "";
   let hasImage = false;
   if (typeof content === "string") {
-    text = appendPreviewText(text, content);
+    text = appendPreviewText(text, content, maxLength);
   } else if (Array.isArray(content)) {
     for (const block of content) {
-      if (!isRecord(block)) continue;
+      if (isRecord(block) === false) continue;
       if (block.type === "image") hasImage = true;
-      if (block.type === "text") text = appendPreviewText(text, block.text);
-      if (text.length > MAX_BRANCH_PREVIEW_LENGTH) break;
+      if (block.type === "text") text = appendPreviewText(text, block.text, maxLength);
+      if (text.length > maxLength) break;
     }
   }
 
-  if (text.length > MAX_BRANCH_PREVIEW_LENGTH) {
-    text = text.slice(0, MAX_BRANCH_PREVIEW_LENGTH) + "…";
-  } else if (!text) {
+  if (text.length > maxLength) {
+    text = text.slice(0, maxLength) + "…";
+  } else if (text.length === 0) {
     text = hasImage
       ? "[image]"
       : entry.message.role === "assistant"
@@ -67,6 +72,56 @@ function previewForEntry(entry: ProjectableEntry): BranchPreview | undefined {
     ? entry.message.role
     : undefined;
   return { ...(role ? { role } : {}), text };
+}
+
+/**
+ * Flatten the raw session tree into display-safe rollback candidates.
+ *
+ * The projected tree intentionally contracts linear chains, so intermediate
+ * user messages are not addressable from it. This list keeps every user and
+ * assistant message with a bounded preview across all branches, giving the
+ * double-Escape rollback picker real entries to select without making the
+ * projected tree recursively deep.
+ */
+export function buildRollbackEntries<T extends ProjectableTreeNode<T>>(
+  nodes: T[]
+): SessionRollbackEntry[] {
+  const entries: SessionRollbackEntry[] = [];
+  const seen = new Set<T>();
+  const stack = [...nodes].reverse();
+
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (seen.has(node)) continue;
+    seen.add(node);
+
+    const entry = node.entry;
+    if (entry.type === "message" && isRecord(entry.message)) {
+      const role = entry.message.role;
+      if (role === "user" || role === "assistant") {
+        const preview = previewForEntry(entry, MAX_ROLLBACK_PREVIEW_LENGTH);
+        const previewText = preview?.text ?? "";
+        const isTextlessAssistant = role === "assistant" && previewText === "[assistant]";
+        const stopReason = typeof entry.message.stopReason === "string" ? entry.message.stopReason : undefined;
+        const keepTextlessAssistant = stopReason === "aborted" || stopReason === "error" || stopReason === "toolUse";
+        if (!isTextlessAssistant || keepTextlessAssistant) {
+          entries.push({
+            id: entry.id,
+            parentId: typeof entry.parentId === "string" ? entry.parentId : null,
+            role,
+            text: isTextlessAssistant ? (stopReason === "aborted" ? "(aborted)" : "(no content)") : previewText,
+            timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+          });
+        }
+      }
+    }
+
+    for (let i = node.children.length - 1; i >= 0; i -= 1) {
+      stack.push(node.children[i]);
+    }
+  }
+
+  return entries;
 }
 
 /**

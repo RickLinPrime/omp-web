@@ -383,6 +383,15 @@ export interface BranchPreview {
   text: string;
 }
 
+/** Flat, display-safe rollback candidate sent alongside the projected tree. */
+export interface SessionRollbackEntry {
+  id: string;
+  parentId: string | null;
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+}
+
 export interface SessionTreeNode {
   entry: SessionEntry;
   children: SessionTreeNode[];

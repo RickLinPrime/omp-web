@@ -16,6 +16,15 @@ export function registerAbortHandler(handler: (() => void) | null): void {
   globalAbortHandler = handler;
 }
 
+/**
+ * Whether an agent/bash run currently owns the Esc key. AppShell uses this to
+ * keep the double-Esc rollback gesture from stealing the second interrupt
+ * press while a run is still shutting down.
+ */
+export function isAbortHandlerRegistered(): boolean {
+  return globalAbortHandler !== null;
+}
+
 // ---------------------------------------------------------------------------
 // Hook: global keyboard shortcuts
 // ---------------------------------------------------------------------------
@@ -34,10 +43,10 @@ interface UseGlobalKeyboardShortcutsOptions {
  *   Esc          – stop the running agent (via module-level abort handler)
  *   Ctrl+Alt+N   – create a new session in the active project directory
  *
- * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
- * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
- * the agent when no menu is open) because it needs intimate knowledge of menu
- * state that is local to that component.
+ * Note: Esc inside a dialog or <textarea>/<input> is deliberately NOT handled
+ * here. Dialogs (rollback picker, settings, extension prompts) own Esc while
+ * open, and ChatInput manages its own Esc logic (closing slash / @ file menus,
+ * stopping the agent when no menu is open).
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -48,9 +57,13 @@ export function useGlobalKeyboardShortcuts(
     const handler = (e: KeyboardEvent): void => {
       // ---- Esc: stop agent ----
       if (e.key === "Escape") {
-        if (!globalAbortHandler) return;
+        if (e.repeat || !globalAbortHandler) return;
 
-        const tag = (e.target as HTMLElement)?.tagName;
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        // Dialogs (rollback picker, settings, extension prompts) own Esc while
+        // they are open; closing them must never abort the run behind them.
+        if (target?.closest?.('[role="dialog"]')) return;
         // Let textarea/input handle Esc internally (ChatInput menus / stop).
         if (tag === "TEXTAREA" || tag === "INPUT") return;
 
